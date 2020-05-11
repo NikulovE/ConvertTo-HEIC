@@ -1,9 +1,8 @@
-﻿# ConvertTo-Heic - Converts image files to the efficient HEIC format
-# https://github.com/DavidAnson/ConvertTo-Heic
+﻿# ConvertTo-Jpeg - Converts RAW (and other) image files to the widely-supported JPEG format
+# https://github.com/DavidAnson/ConvertTo-Jpeg
 
 Param (
     [Parameter(
-        Mandatory = $true,
         Position = 1,
         ValueFromPipeline = $true,
         ValueFromPipelineByPropertyName = $true,
@@ -11,9 +10,16 @@ Param (
         HelpMessage = "Array of image file names to convert to HEIC")]
     [Alias("FullName")]
     [String[]]
-    $Files
-)
+    $Files,
 
+    [Parameter(
+        HelpMessage = "Fix extension of HEIC files")]
+    [Switch]
+    $FixExtensionIfHeic,
+    [Switch]
+    $RemoveJpegAfterConverting
+)
+    #$Files=Get-ChildItem -Path $Folder\* -Include *.jpg, *.jpeg   -Recurse 
 Begin
 {
     # Technique for await-ing WinRT APIs: https://fleexlab.blogspot.com/2018/02/using-winrts-iasyncoperation-in.html
@@ -34,6 +40,7 @@ Begin
         $netTask.Wait() | Out-Null
     }
 
+
     # Reference WinRT assemblies
     [Windows.Storage.StorageFile, Windows.Storage, ContentType=WindowsRuntime] | Out-Null
     [Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics, ContentType=WindowsRuntime] | Out-Null
@@ -41,27 +48,31 @@ Begin
 
 Process
 {
-    # Check dependencies
-    if (([Windows.Graphics.Imaging.BitmapEncoder]::HeifEncoderId -eq $null) -or ([Windows.Graphics.Imaging.BitmapDecoder]::HeifDecoderId -eq $null))
-    {
-        Write-Error "HEIC encoder/decoder not present. Please see README.md for more information."
-        Exit
-    }
-
+    
     # Summary of imaging APIs: https://docs.microsoft.com/en-us/windows/uwp/audio-video-camera/imaging
+    
     foreach ($file in $Files)
     {
-        Write-Host $file -NoNewline
+        Write-Host $file -NoNewline               
         try
-        {
+        {         
             try
-            {
+            {       
+                $ExifTool=(gci -Path exiftool.exe).FullName     
+                $command = "$($ExifTool) -all:all= $('"'+$file+'"') --exif:Orientation -charset filename=cp1251"            
+                $bytes = [System.Text.Encoding]::Unicode.GetBytes($command)
+                $encodedCommand = [Convert]::ToBase64String($bytes)
+                
+                powershell -EncodedCommand $encodedCommand
                 # Get SoftwareBitmap from input file
                 $file = Resolve-Path -LiteralPath $file
-                $inputFile = AwaitOperation ([Windows.Storage.StorageFile]::GetFileFromPathAsync($file)) ([Windows.Storage.StorageFile])
+                
+                $inputfile = awaitoperation ([windows.storage.storagefile]::getfilefrompathAsync($file)) ([Windows.Storage.StorageFile])            
                 $inputFolder = AwaitOperation ($inputFile.GetParentAsync()) ([Windows.Storage.StorageFolder])
                 $inputStream = AwaitOperation ($inputFile.OpenReadAsync()) ([Windows.Storage.Streams.IRandomAccessStreamWithContentType])
                 $decoder = AwaitOperation ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($inputStream)) ([Windows.Graphics.Imaging.BitmapDecoder])
+
+                            
             }
             catch
             {
@@ -71,19 +82,36 @@ Process
             }
             if ($decoder.DecoderInformation.CodecId -eq [Windows.Graphics.Imaging.BitmapDecoder]::HeifDecoderId)
             {
-                # Skip HEIC-encoded files
-                Write-Host " [Already HEIC]"
+                $extension = $inputFile.FileType                
+                if ($FixExtensionIfHeic -and ($extension -ne ".heic") -and ($extension -ne ".heif"))
+                {
+                    # Rename HEIF-encoded files to have ".heic" extension
+                    $newName = $inputFile.Name -replace ($extension + "$"), ".heic"
+                    AwaitAction ($inputFile.RenameAsync($newName))
+                    Write-Host " => $newName"
+                }
+                else
+                {
+                    # Skip JPEG-encoded files
+                    Write-Host " [Already HEIC]"
+                }
                 continue
+            }
+            else{
+                $extension = $inputFile.FileType                
+                $outputFileName = $inputFile.Name.Replace($extension,".heic")
             }
             $bitmap = AwaitOperation ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
 
             # Write SoftwareBitmap to output file
-            $outputFileName = $inputFile.Name + ".heic";
+            #$outputFileName = $inputFile.Name + ".heic";
             $outputFile = AwaitOperation ($inputFolder.CreateFileAsync($outputFileName, [Windows.Storage.CreationCollisionOption]::ReplaceExisting)) ([Windows.Storage.StorageFile])
+            $properOut = AwaitOperation ($outputFile.Properties.GetImagePropertiesAsync())([Windows.Storage.FileProperties.ImageProperties])                
+
             $outputStream = AwaitOperation ($outputFile.OpenAsync([Windows.Storage.FileAccessMode]::ReadWrite)) ([Windows.Storage.Streams.IRandomAccessStream])
-            $encoder = AwaitOperation ([Windows.Graphics.Imaging.BitmapEncoder]::CreateAsync([Windows.Graphics.Imaging.BitmapEncoder]::HeifEncoderId, $outputStream)) ([Windows.Graphics.Imaging.BitmapEncoder])
+            $encoder = AwaitOperation ([Windows.Graphics.Imaging.BitmapEncoder]::CreateAsync([Windows.Graphics.Imaging.BitmapEncoder]::JpegEncoderId, $outputStream)) ([Windows.Graphics.Imaging.BitmapEncoder])
             $encoder.SetSoftwareBitmap($bitmap)
-            $encoder.IsThumbnailGenerated = $true
+
 
             # Do it
             AwaitAction ($encoder.FlushAsync())
@@ -99,6 +127,20 @@ Process
             # Clean-up
             if ($inputStream -ne $null) { [System.IDisposable]$inputStream.Dispose() }
             if ($outputStream -ne $null) { [System.IDisposable]$outputStream.Dispose() }
+
+            $properOut.Orientation.value__=6                      
+        }
+        try{
+        .\metacopy -e -p $($file.Path+"_original") $outputFile.Path
+        }
+        catch{}
+        if($RemoveJpegAfterConverting){
+            Remove-Item $file.Path
+            Remove-Item $($file.Path+"_original")
+        }
+        else{
+            Remove-Item $file.Path
+            Rename-Item  -Path $($file.Path+"_original") -NewName $($file.Path+"_original").Replace("_original","")
         }
     }
 }
