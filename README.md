@@ -1,6 +1,6 @@
 # ConvertTo-Heic
 
-> A PowerShell script that converts image files to the efficient HEIC format
+> A PowerShell script that converts image files to the efficient HEIC format with saving EXIF information
 
 ## Overview
 
